@@ -1,7 +1,7 @@
 # IPMI Fan Control Daemon for IBM System x3650
   This port was made in an attempt to quiet down an IBM system x3650 M4.
 
-  ### NOTE:
+  #### NOTE:
     I'm NOT a developer and i know nothing about perl and the unix system.
     What i did was figuring out how to modify the script according to the raw ipmi commands i've found on reddit posts and learning the tiny bit of perl i needed to know.
 
