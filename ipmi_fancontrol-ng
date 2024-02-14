@@ -43,7 +43,7 @@ $hostname =~ s/\n//g;
 #my $number_of_fanbanks  = 1; # Number of BANKs of FANs to update
 my $number_of_fanbanks  = 2; # Number of BANKs of FANs to update
 my $min_temp_change     = 0; # *C minimum change to actually cause a fan speed update
-my $seconds_to_sleep    = 5; # Number of seconds to sleep between update loops
+my $seconds_to_sleep    = 3; # Number of seconds to sleep between update loops
 
 # IPMI Configuration
 #my $ipmi_username       = "username_goes_here";
