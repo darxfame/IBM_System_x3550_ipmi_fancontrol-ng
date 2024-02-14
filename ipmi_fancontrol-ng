@@ -43,7 +43,7 @@ $hostname =~ s/\n//g;
 #my $number_of_fanbanks  = 1; # Number of BANKs of FANs to update
 my $number_of_fanbanks  = 2; # Number of BANKs of FANs to update
 my $min_temp_change     = 0; # *C minimum change to actually cause a fan speed update
-my $seconds_to_sleep    = 5; # Number of seconds to sleep between update loops
+my $seconds_to_sleep    = 3; # Number of seconds to sleep between update loops
 
 # IPMI Configuration
 #my $ipmi_username       = "username_goes_here";
@@ -83,6 +83,7 @@ sub Internal_DoSetFanSpeed
     for (my $i = 1; $i <= $number_of_fanbanks; $i++)
     {
         print "Setting FanBank n°$i speed at $fan_speed\n";
+        #ipmitool raw 0x3a 0x07 1 100 0
         `$ipmi_preamble raw 0x3a 0x07 $i $fan_speed 0x01> /dev/null 2>&1`;
     }
 }
@@ -153,13 +154,13 @@ sub UpdateFanSpeed
 { 
     my $current_cpu_temp = GetCPUTemp();
     my $current_gpu_temp = 0;
-
+    
     $g_current_cpu_temp = $current_cpu_temp;
     $g_current_gpu_temp = $current_gpu_temp;
-
+    
     print "Maximum CPU Temperature Seen: $current_cpu_temp degrees C.\n";
     print "Maximum GPU Temperature Seen: $current_gpu_temp degrees C.\n";
-
+    
     my $desired_fan_speed = 0;
     my $calculated_speed = 0;
     foreach my $a (reverse sort keys %cpu_temp_scale) {
