@@ -82,7 +82,7 @@ sub Internal_DoSetFanSpeed
     # Sets the speed for each individual fan
     for (my $i = 1; $i <= $number_of_fanbanks; $i++)
     {
-        print "Setting FanBank n°$i speed at $fan_speed\n";
+        print "Setting FanBank nВ°$i speed at $fan_speed\n";
         #ipmitool raw 0x3a 0x07 1 100 0
         `$ipmi_preamble raw 0x3a 0x07 $i $fan_speed 0x01> /dev/null 2>&1`;
     }
@@ -119,13 +119,14 @@ sub GetCPUTemp
 {
     my $current_cpu_temp = 0;
 
-    my $sensors_output = `sensors | grep "Package" | sed 's/.*:\\s*+\\(.*\\)  .*(.*/\\1/'`;
+    my $sensors_output = `sensors | grep "Core" | sed 's/.*:\\s*+\\([0-9.]*\\).*C.*/\\1/'`;
     my @vals = split("\n", $sensors_output);
     foreach my $value (@vals)
     {
-        # Remove the *C from $sensors_output (and anything else thats not numbers or decimal points)
-        my $cpu_temp = `echo $value | sed -e 's/[^0-9. ]*//g' -e 's/ \\+/ /g'`;
-        $current_cpu_temp = max($cpu_temp, $current_cpu_temp);
+        # Убедитесь, что значение содержит только цифры и десятичную точку
+        if ($value =~ /^[0-9.]+$/) {
+            $current_cpu_temp = max($value, $current_cpu_temp);
+        }
     }
     # Remove trailing line endings
     $current_cpu_temp =~ s/\n//g;
