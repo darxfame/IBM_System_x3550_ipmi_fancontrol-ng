@@ -1,0 +1,258 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use List::Util qw[min max sum];
+
+# === Fan control script for IBM x3550 M3 ===
+# ENHANCED VERSION v2.1
+# Features:
+# 1. Progressive CPU1 fan boost when RAM is hot
+# 2. RAM temperature trend analysis
+# 3. Emergency protocols for critical temperatures
+# 4. Comprehensive logging
+
+# === Configuration ===
+my $hostname = `hostname`;
+chomp($hostname);
+
+my $number_of_fanbanks = 3;
+my $min_temp_change    = 1;
+my $seconds_to_sleep   = 5;
+
+my $ipmi_preamble = "ipmitool";
+
+# Temperature thresholds (%)
+my %temp_to_fan_speed = (
+    85 => 100,  # Emergency cooling
+    75 => 70,
+    65 => 50,
+    55 => 30,
+    45 => 20,   # Minimum safe speed for RAM
+    35 => 15,
+);
+
+# Progressive boost settings for CPU1 when RAM is hot
+my %ram_boost_settings = (
+    70 => 30,  # At 70°C RAM: +30% to CPU1 fan
+    65 => 20,  # At 65°C RAM: +20%
+    60 => 10,  # At 60°C RAM: +10%
+);
+
+my %temp_scale;
+
+# Global variables
+my @g_current_fan_duty_cycle = (15, 20, 15);
+my @g_current_temps = (0, 0, 0);
+my @g_last_set_temps = (0, 0, 0);
+my $last_ram_temp = 0;
+my $ram_temp_trend = 0; # 0=stable, 1=rising, -1=falling
+my $emergency_mode = 0;
+
+$ENV{LC_ALL} = 'C';
+
+# Logging setup
+open(my $LOG, '>>', '/var/log/fan_control.log') or warn "Cannot open log file: $!";
+sub log_message {
+    my ($msg, $is_critical) = @_;
+    my $timestamp = localtime();
+    print $LOG "[$timestamp] $msg\n";
+    print "$msg\n" if $is_critical || !$emergency_mode;
+}
+
+sub SetManualFanMode {
+    log_message("Enabling manual fan control", 0);
+    `$ipmi_preamble raw 0x3a 0x01 0x00 > /dev/null 2>&1`;
+}
+
+sub Internal_DoSetFanSpeed {
+    my ($bank, $fan_speed) = @_;
+    $fan_speed = max(10, min(100, $fan_speed));
+    my $hex_bank  = sprintf("0x%02x", $bank);
+    my $hex_speed = sprintf("0x%02x", $fan_speed);
+
+    log_message("Setting FanBank #$bank to $fan_speed%", 0);
+    `$ipmi_preamble raw 0x3a 0x07 $hex_bank $hex_speed 0x01 > /dev/null 2>&1`;
+}
+
+sub SetFanSpeed {
+    my ($bank, $fan_speed, $temp, $index) = @_;
+
+    # Emergency protocol for RAM
+    if ($bank == 2) {
+        $fan_speed = max(20, $fan_speed);
+        if ($temp > 85) {
+            $fan_speed = 100;
+            $emergency_mode = 1;
+            log_message("CRITICAL: RAM OVERHEAT ($temp°C)! FORCING 100% FAN SPEED", 1);
+        } elsif ($temp <= 75) {
+            $emergency_mode = 0;
+        }
+    }
+
+    my $temp_diff = abs($temp - $g_last_set_temps[$index]);
+    if ($temp_diff >= $min_temp_change || $g_current_fan_duty_cycle[$bank-1] != $fan_speed) {
+        $g_last_set_temps[$index] = $temp;
+        $g_current_fan_duty_cycle[$bank-1] = $fan_speed;
+        Internal_DoSetFanSpeed($bank, $fan_speed);
+    }
+}
+
+sub GetTemps {
+    my ($cpu1_temps, $cpu2_temps, $ram_temp) = ([], [], 0);
+    my $current_cpu = '';
+    my $sensors_output = `sensors`;
+
+    # Improved RAM temperature detection
+    foreach my $line (split(/\n/, $sensors_output)) {
+        if ($line =~ /(dimm|mem|ram|pci|temp1).*?(\+?\d+\.?\d*)/i) {
+            $ram_temp = $2;
+            $ram_temp =~ s/\+//;
+            last if $ram_temp > 30;
+        }
+    }
+
+    # Calculate temperature trend
+    if ($last_ram_temp > 0) {
+        $ram_temp_trend = $ram_temp > $last_ram_temp + 0.5 ? 1 : 
+                         $ram_temp < $last_ram_temp - 0.5 ? -1 : 0;
+    }
+    $last_ram_temp = $ram_temp;
+
+    # Fallback to CPU temp if RAM sensor fails
+    if ($ram_temp < 30) {
+        log_message("WARNING: Invalid RAM temp ($ram_temp°C), using CPU fallback", 1);
+        $ram_temp = max(@g_current_temps[0,2] || 50);
+    }
+
+    # Get CPU temperatures
+    foreach my $line (split(/\n/, $sensors_output)) {
+        if ($line =~ /coretemp-isa-0000/) { $current_cpu = 'cpu1'; next; }
+        elsif ($line =~ /coretemp-isa-0001/) { $current_cpu = 'cpu2'; next; }
+        
+        if ($line =~ /Core \d+:\s+\+(\d+\.\d)\s*°?C/) {
+            my $temp = $1;
+            push @{$current_cpu eq 'cpu1' ? $cpu1_temps : $cpu2_temps}, $temp;
+        }
+    }
+
+    # Calculate averages
+    my $cpu1_avg = @$cpu1_temps ? sprintf("%.1f", sum(@$cpu1_temps)/@$cpu1_temps) : 40;
+    my $cpu2_avg = @$cpu2_temps ? sprintf("%.1f", sum(@$cpu2_temps)/@$cpu2_temps) : 40;
+
+    return ($cpu1_avg, $ram_temp, $cpu2_avg);
+}
+
+sub CalculateScalars {
+    my @previous = ();
+    foreach my $a (sort keys %temp_to_fan_speed) {
+        my @current = ($a, $temp_to_fan_speed{$a});
+        if (@previous) {
+            my $m = ($current[1] - $previous[1]) / ($current[0] - $previous[0]);
+            my $b = $current[1] - ($m * $current[0]);
+            $temp_scale{$a} = [ $m, $b ];
+        }
+        @previous = @current;
+    }
+}
+
+sub CalculateBoost {
+    my ($ram_temp, $base_speed) = @_;
+    my $boost = 0;
+    
+    # Apply progressive boost only if temperature is rising or stable-high
+    if ($ram_temp_trend >= 0 && $ram_temp > 60) {
+        foreach my $threshold (sort { $b <=> $a } keys %ram_boost_settings) {
+            if ($ram_temp >= $threshold) {
+                $boost = $ram_boost_settings{$threshold};
+                last;
+            }
+        }
+    }
+    
+    return min(100, $base_speed + $boost);
+}
+
+sub UpdateFanSpeed {
+    my ($cpu1_temp, $ram_temp, $cpu2_temp) = GetTemps();
+
+    $g_current_temps[0] = $cpu1_temp;
+    $g_current_temps[1] = $ram_temp;
+    $g_current_temps[2] = $cpu2_temp;
+
+    log_message(sprintf("Temps: CPU1=%.1f°C, RAM=%.1f°C (trend: %s), CPU2=%.1f°C", 
+              $cpu1_temp, $ram_temp, 
+              $ram_temp_trend == 1 ? "↑" : $ram_temp_trend == -1 ? "↓" : "→",
+              $cpu2_temp), 0);
+
+    my @desired_fan_speeds = (15, 20, 15);
+
+    # Base speeds calculation
+    for my $bank (1..3) {
+        my $temp = $g_current_temps[$bank-1];
+        my $calculated_speed = 15;
+
+        foreach my $a (reverse sort keys %temp_scale) {
+            if ($temp >= $a) {
+                my ($m, $b) = @{$temp_scale{$a}};
+                $calculated_speed = ($m * $temp) + $b;
+                last;
+            }
+        }
+
+        $desired_fan_speeds[$bank-1] = sprintf("%.0f", max(10, $calculated_speed));
+    }
+
+    # Apply CPU1 boost if RAM is hot
+    if ($ram_temp > 60 && $ram_temp_trend >= 0) {
+        my $boosted_speed = CalculateBoost($ram_temp, $desired_fan_speeds[0]);
+        if ($boosted_speed > $desired_fan_speeds[0]) {
+            log_message(sprintf("Applying CPU1 boost: %d%% -> %d%% (RAM %.1f°C %s)",
+                      $desired_fan_speeds[0], $boosted_speed,
+                      $ram_temp, $ram_temp_trend == 1 ? "rising" : "stable"), 0);
+            $desired_fan_speeds[0] = $boosted_speed;
+        }
+    }
+
+    # Emergency override if any critical temperature
+    if ($ram_temp > 90 || $cpu1_temp > 90 || $cpu2_temp > 90) {
+        @desired_fan_speeds = (100, 100, 100);
+        log_message("EMERGENCY: Critical temperature detected! MAX FAN SPEED", 1);
+    }
+
+    # Save metrics for Telegraf
+    open(my $fh, '>>', '/tmp/fan_speed_telegraf') or die "Cannot open telegraf file: $!";
+    print $fh "fans,host=$hostname,bank=1 speed_percent=$desired_fan_speeds[0]\n";
+    print $fh "fans,host=$hostname,bank=2 speed_percent=$desired_fan_speeds[1]\n";
+    print $fh "fans,host=$hostname,bank=3 speed_percent=$desired_fan_speeds[2]\n";
+    print $fh "temperature,host=$hostname cpu1_temp_c=$cpu1_temp\n";
+    print $fh "temperature,host=$hostname ram_temp_c=$ram_temp\n";
+    print $fh "temperature,host=$hostname cpu2_temp_c=$cpu2_temp\n";
+    print $fh "system,host=$hostname emergency_mode=$emergency_mode\n";
+    close($fh);
+
+    SetFanSpeed(1, $desired_fan_speeds[0], $cpu1_temp, 0);
+    SetFanSpeed(2, $desired_fan_speeds[1], $ram_temp, 1);
+    SetFanSpeed(3, $desired_fan_speeds[2], $cpu2_temp, 2);
+}
+
+# === Main Program ===
+log_message("Starting enhanced fan control script v2.1", 0);
+
+SetManualFanMode();
+
+# Initial full-speed test
+log_message("Initial fan test (100% for $seconds_to_sleep seconds)", 0);
+for my $bank (1..$number_of_fanbanks) {
+    Internal_DoSetFanSpeed($bank, 100);
+}
+sleep $seconds_to_sleep;
+
+CalculateScalars();
+
+# Main loop
+while (1) {
+    UpdateFanSpeed();
+    sleep $seconds_to_sleep;
+}
+
+close($LOG);
