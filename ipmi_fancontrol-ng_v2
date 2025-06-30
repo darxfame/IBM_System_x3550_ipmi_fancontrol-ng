@@ -1,0 +1,231 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use List::Util qw[min max sum];
+
+# === Fan Control Script for IBM x3550 M3 ===
+# FINAL OPTIMIZED VERSION v3.0
+# New Logic:
+# - CPU1 Fan (Bank1) = max(CPU1_TEMP, RAM_TEMP * 0.7)
+# - RAM Fan (Bank2) = 15% (base), scales with CPU1 fan when >55%
+# - CPU2 Fan (Bank3) = CPU2_TEMP only
+
+# === Configuration ===
+my $hostname = `hostname`;
+chomp($hostname);
+
+my $number_of_fanbanks = 3;
+my $min_temp_change    = 1;
+my $seconds_to_sleep   = 5;
+
+my $ipmi_preamble = "ipmitool";
+
+# Temperature thresholds (%)
+my %temp_to_fan_speed = (
+    85 => 100,  # Emergency cooling
+    75 => 70,
+    65 => 50,
+    55 => 30,
+    45 => 20,
+    35 => 15,
+);
+
+# RAM influence on CPU1 fan (0.7 = 70% weight)
+my $ram_to_cpu1_ratio = 0.7;
+
+# RAM fan scaling when CPU1 > 55%
+my %ram_fan_scaling = (
+    100 => 100, # When CPU1 at 100%, RAM at 100%
+    80  => 60,
+    55  => 15,  # Baseline
+);
+
+my %temp_scale;
+my $emergency_mode = 0;
+
+$ENV{LC_ALL} = 'C';
+
+# Logging setup
+open(my $LOG, '>>', '/var/log/fan_control.log') or warn "Cannot open log file: $!";
+sub log_message {
+    my ($msg, $is_critical) = @_;
+    my $timestamp = localtime();
+    print $LOG "[$timestamp] $msg\n";
+    print "$msg\n" if $is_critical || !$emergency_mode;
+}
+
+sub SetManualFanMode {
+    log_message("Enabling manual fan control", 0);
+    `$ipmi_preamble raw 0x3a 0x01 0x00 > /dev/null 2>&1`;
+}
+
+sub Internal_DoSetFanSpeed {
+    my ($bank, $fan_speed) = @_;
+    $fan_speed = max(10, min(100, $fan_speed));
+    my $hex_bank  = sprintf("0x%02x", $bank);
+    my $hex_speed = sprintf("0x%02x", $fan_speed);
+
+    log_message("Setting FanBank #$bank to $fan_speed%", 0);
+    `$ipmi_preamble raw 0x3a 0x07 $hex_bank $hex_speed 0x01 > /dev/null 2>&1`;
+}
+
+sub CalculateRamFanSpeed {
+    my ($cpu1_speed) = @_;
+    
+    # Default speed if below threshold
+    return 15 if $cpu1_speed <= 55;
+    
+    # Linear interpolation for scaling
+    my @sorted_keys = sort { $a <=> $b } keys %ram_fan_scaling;
+    for my $i (0..$#sorted_keys-1) {
+        if ($cpu1_speed >= $sorted_keys[$i] && $cpu1_speed <= $sorted_keys[$i+1]) {
+            my $range = $sorted_keys[$i+1] - $sorted_keys[$i];
+            my $pos = $cpu1_speed - $sorted_keys[$i];
+            my $speed_range = $ram_fan_scaling{$sorted_keys[$i+1]} - $ram_fan_scaling{$sorted_keys[$i]};
+            return int($ram_fan_scaling{$sorted_keys[$i]} + ($pos/$range)*$speed_range);
+        }
+    }
+    
+    return 100; # Fallback
+}
+
+sub GetTemps {
+    my ($cpu1_temps, $cpu2_temps, $ram_temp) = ([], [], 0);
+    my $current_cpu = '';
+    my $sensors_output = `sensors`;
+
+    # RAM temperature detection
+    foreach my $line (split(/\n/, $sensors_output)) {
+        if ($line =~ /(dimm|mem|ram|pci|temp1).*?(\+?\d+\.?\d*)/i) {
+            $ram_temp = $2;
+            $ram_temp =~ s/\+//;
+            last if $ram_temp > 30;
+        }
+    }
+
+    # Fallback if RAM sensor fails
+    if ($ram_temp < 30) {
+        log_message("WARNING: Invalid RAM temp ($ram_temp°C), using CPU fallback", 1);
+        $ram_temp = max(@g_current_temps[0,2] || 50);
+    }
+
+    # CPU temperatures
+    foreach my $line (split(/\n/, $sensors_output)) {
+        if ($line =~ /coretemp-isa-0000/) { $current_cpu = 'cpu1'; next; }
+        elsif ($line =~ /coretemp-isa-0001/) { $current_cpu = 'cpu2'; next; }
+        
+        if ($line =~ /Core \d+:\s+\+(\d+\.\d)\s*°?C/) {
+            my $temp = $1;
+            push @{$current_cpu eq 'cpu1' ? $cpu1_temps : $cpu2_temps}, $temp;
+        }
+    }
+
+    my $cpu1_avg = @$cpu1_temps ? sprintf("%.1f", sum(@$cpu1_temps)/@$cpu1_temps) : 40;
+    my $cpu2_avg = @$cpu2_temps ? sprintf("%.1f", sum(@$cpu2_temps)/@$cpu2_temps) : 40;
+
+    return ($cpu1_avg, $ram_temp, $cpu2_avg);
+}
+
+sub CalculateScalars {
+    my @previous = ();
+    foreach my $a (sort keys %temp_to_fan_speed) {
+        my @current = ($a, $temp_to_fan_speed{$a});
+        if (@previous) {
+            my $m = ($current[1] - $previous[1]) / ($current[0] - $previous[0]);
+            my $b = $current[1] - ($m * $current[0]);
+            $temp_scale{$a} = [ $m, $b ];
+        }
+        @previous = @current;
+    }
+}
+
+sub CalculateFanSpeed {
+    my ($temp, $additional_temp) = @_;
+    my $calculated_speed = 15;
+
+    foreach my $a (reverse sort keys %temp_scale) {
+        if ($temp >= $a) {
+            my ($m, $b) = @{$temp_scale{$a}};
+            $calculated_speed = ($m * $temp) + $b;
+            last;
+        }
+    }
+    
+    # Apply additional temperature influence
+    if ($additional_temp) {
+        my $additional_speed = 15;
+        foreach my $a (reverse sort keys %temp_scale) {
+            if ($additional_temp >= $a) {
+                my ($m, $b) = @{$temp_scale{$a}};
+                $additional_speed = ($m * $additional_temp) + $b;
+                last;
+            }
+        }
+        $calculated_speed = max($calculated_speed, $additional_speed * $ram_to_cpu1_ratio);
+    }
+
+    return max(15, min(100, int($calculated_speed)));
+}
+
+sub UpdateFanSpeed {
+    my ($cpu1_temp, $ram_temp, $cpu2_temp) = GetTemps();
+
+    $g_current_temps[0] = $cpu1_temp;
+    $g_current_temps[1] = $ram_temp;
+    $g_current_temps[2] = $cpu2_temp;
+
+    log_message(sprintf("Temps: CPU1=%.1f°C, RAM=%.1f°C, CPU2=%.1f°C", 
+              $cpu1_temp, $ram_temp, $cpu2_temp), 0);
+
+    # Calculate base speeds
+    my $cpu1_speed = CalculateFanSpeed($cpu1_temp, $ram_temp);
+    my $cpu2_speed = CalculateFanSpeed($cpu2_temp);
+    my $ram_speed = CalculateRamFanSpeed($cpu1_speed);
+
+    # Emergency override
+    if ($ram_temp > 90 || $cpu1_temp > 90 || $cpu2_temp > 90) {
+        ($cpu1_speed, $ram_speed, $cpu2_speed) = (100, 100, 100);
+        $emergency_mode = 1;
+        log_message("EMERGENCY: Critical temperature! MAX FAN SPEED", 1);
+    } elsif ($emergency_mode && $ram_temp < 80 && $cpu1_temp < 80 && $cpu2_temp < 80) {
+        $emergency_mode = 0;
+    }
+
+    # Save metrics
+    open(my $fh, '>>', '/tmp/fan_speed_telegraf') or die "Cannot open telegraf file: $!";
+    print $fh "fans,host=$hostname,bank=1 speed_percent=$cpu1_speed\n";
+    print $fh "fans,host=$hostname,bank=2 speed_percent=$ram_speed\n";
+    print $fh "fans,host=$hostname,bank=3 speed_percent=$cpu2_speed\n";
+    print $fh "temperature,host=$hostname cpu1_temp_c=$cpu1_temp\n";
+    print $fh "temperature,host=$hostname ram_temp_c=$ram_temp\n";
+    print $fh "temperature,host=$hostname cpu2_temp_c=$cpu2_temp\n";
+    print $fh "system,host=$hostname emergency_mode=$emergency_mode\n";
+    close($fh);
+
+    # Apply settings
+    SetFanSpeed(1, $cpu1_speed, $cpu1_temp, 0);
+    SetFanSpeed(2, $ram_speed, $ram_temp, 1);
+    SetFanSpeed(3, $cpu2_speed, $cpu2_temp, 2);
+}
+
+# === Main Program ===
+log_message("Starting optimized fan control script v3.0", 0);
+
+SetManualFanMode();
+
+# Initial full-speed test
+log_message("Initial fan test (100% for $seconds_to_sleep seconds)", 0);
+for my $bank (1..$number_of_fanbanks) {
+    Internal_DoSetFanSpeed($bank, 100);
+}
+sleep $seconds_to_sleep;
+
+CalculateScalars();
+
+# Main loop
+while (1) {
+    UpdateFanSpeed();
+    sleep $seconds_to_sleep;
+}
+
+close($LOG);
