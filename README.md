@@ -1,5 +1,5 @@
-# IPMI Fan Control Daemon for IBM System x3650
-  This port was made in an attempt to quiet down an IBM system x3650 M4.
+# IPMI Fan Control Daemon for IBM System x3550
+  This port was made in an attempt to quiet down an IBM system x3550 M4.
 
   #### NOTE:
   I'm NOT a developer and i know nothing about perl and the unix system.
@@ -28,7 +28,7 @@
   #### NOTE: 
   You use this script at your own risk, and no warranty is provided. Do not use in produciton environments.
 
-  * Maintainer: Brian Wilson <brian@wiltech.org>
+  * Maintainer: Kochegizov Artem <metra52@ya.ru>
   * Original Author: Layla Mah <layla@insightfulvr.com>
   * Original Version: https://github.com/missmah/ipmi_tools
 
@@ -48,12 +48,20 @@
 
   # Install
   cp ipmi_fancontrol-ng /usr/bin/
+  cp ipmi_fan_restart /usr/bin/
   cp ipmi_fancontrol-ng.service /usr/lib/systemd/system/
   chmod +x /usr/bin/ipmi_fancontrol-ng
+  chmod +x /usr/bin/ipmi_fan_restart
 
   # Enable on boot and start
   systemctl enable ipmi_fancontrol-ng
   systemctl start ipmi_fancontrol-ng
+  ```
+
+  ### Restart service
+  ```sh
+  # Execute
+  /usr/bin/ipmi_fan_restart
   ```
 
   ### InfluxDB & Telegraf
