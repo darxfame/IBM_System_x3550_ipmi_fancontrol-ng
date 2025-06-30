@@ -4,11 +4,12 @@ use warnings;
 use List::Util qw[min max sum];
 
 # === Fan control script for IBM x3550 M3 ===
-# Controls fans via IPMI based on CPU temperatures
+# Controls fans via IPMI based on CPU and RAM temperatures
 # Fan Bank 1: based on average temperature of CPU1 (coretemp-isa-0000)
-# Fan Bank 2: based on minimum average temperature of CPU1 and CPU2
+# Fan Bank 2: based on RAM temperature (intel5500-pci-00a3)
 # Fan Bank 3: based on average temperature of CPU2 (coretemp-isa-0001)
 # On startup, sets fans to 100% for $seconds_to_sleep seconds, then reverts to temperature-based control
+# Optimized for minimal noise with low fan speeds for safe temperatures
 
 # === Configuration ===
 my $hostname = `hostname`;
@@ -20,21 +21,21 @@ my $seconds_to_sleep   = 5;          # Interval for checking temperatures and in
 
 my $ipmi_preamble = "ipmitool";      # Local IPMI command, no authentication needed
 
-# Temperature thresholds and corresponding fan speeds (%)
-my %cpu_temp_to_fan_speed = (
-    80 => 100,
-    70 => 80,
-    60 => 40,
-    50 => 25,
-    40 => 15,
+# Temperature thresholds and corresponding fan speeds (%) for quiet operation
+my %temp_to_fan_speed = (
+    80 => 100,  # Critical threshold, max cooling
+    70 => 60,   # Moderate cooling
+    60 => 30,   # Balanced cooling
+    50 => 15,   # Quiet operation
+    40 => 10,   # Minimal noise for safe temperatures
 );
 
-my %cpu_temp_scale;
+my %temp_scale;
 
 # Global variables
 my @g_current_fan_duty_cycle = (0, 0, 0); # Fan speeds for banks 1, 2, 3
-my @g_current_cpu_temp = (0, 0);         # Average temperatures for CPU1, CPU2
-my @g_last_set_cpu_temp = (0, 0);        # Last set temperatures for CPU1, CPU2
+my @g_current_temps = (0, 0, 0);         # Average temperatures for CPU1, RAM, CPU2
+my @g_last_set_temps = (0, 0, 0);        # Last set temperatures for CPU1, RAM, CPU2
 
 # Set locale to ensure consistent number formatting
 $ENV{LC_ALL} = 'C';
@@ -57,31 +58,31 @@ sub Internal_DoSetFanSpeed {
 
 # Update fan speed for a specific bank
 sub SetFanSpeed {
-    my ($bank, $fan_speed, $cpu_temp, $cpu_index) = @_;
+    my ($bank, $fan_speed, $temp, $index) = @_;
 
-    # Ensure minimum fan speed
-    $fan_speed = 15 if $fan_speed < 15;
+    # Ensure minimum fan speed (hardware-dependent, 10% assumed supported)
+    $fan_speed = 10 if $fan_speed < 10;
 
-    my $temp_diff = abs($cpu_temp - $g_last_set_cpu_temp[$cpu_index]);
+    my $temp_diff = abs($temp - $g_last_set_temps[$index]);
     if ($temp_diff >= $min_temp_change) {
         print "\n";
         print "*********************************************************\n";
         print "Updating fan speed for bank $bank\n";
-        print "CPU temperature change: $temp_diff °C\n";
-        print "Current CPU temperature: $cpu_temp °C\n";
+        print "Temperature change: $temp_diff °C\n";
+        print "Current temperature: $temp °C\n";
         print "Desired fan speed: $fan_speed%\n";
         print "*********************************************************\n";
 
-        $g_last_set_cpu_temp[$cpu_index] = $cpu_temp;
+        $g_last_set_temps[$index] = $temp;
         $g_current_fan_duty_cycle[$bank - 1] = $fan_speed;
 
         Internal_DoSetFanSpeed($bank, $fan_speed);
     }
 }
 
-# Retrieve CPU temperatures from sensors
-sub GetCPUTemp {
-    my ($cpu1_temps, $cpu2_temps) = ([], []);
+# Retrieve CPU and RAM temperatures from sensors
+sub GetTemps {
+    my ($cpu1_temps, $cpu2_temps, $ram_temp) = ([], [], 0);
     my $current_cpu = '';
 
     my $sensors_output = `sensors`;
@@ -92,8 +93,11 @@ sub GetCPUTemp {
         } elsif ($line =~ /coretemp-isa-0001/) {
             $current_cpu = 'cpu2';
             next;
+        } elsif ($line =~ /intel5500-pci-00a3.*temp1:\s+\+(\d+\.\d)\s*C/) {
+            $ram_temp = $1;
+            next;
         }
-        # Match temperature lines (e.g., "Core 0:       +38.0 C")
+        # Match CPU temperature lines (e.g., "Core 0:       +38.0 C")
         if ($line =~ /Core \d+:\s+\+(\d+\.\d)\s*C/) {
             my $temp = $1;
             if ($current_cpu eq 'cpu1') {
@@ -107,8 +111,9 @@ sub GetCPUTemp {
     # Calculate average temperatures
     my $cpu1_avg = @$cpu1_temps ? sprintf("%.1f", (sum(@$cpu1_temps) / @$cpu1_temps)) : 0;
     my $cpu2_avg = @$cpu2_temps ? sprintf("%.1f", (sum(@$cpu2_temps) / @$cpu2_temps)) : 0;
+    my $ram_avg = $ram_temp || 0;
 
-    return ($cpu1_avg, $cpu2_avg);
+    return ($cpu1_avg, $ram_avg, $cpu2_avg);
 }
 
 # Sum array elements
@@ -122,12 +127,12 @@ sub sum {
 # Calculate fan speed scalars for smooth transitions
 sub CalculateScalars {
     my @previous = ();
-    foreach my $a (sort keys %cpu_temp_to_fan_speed) {
-        my @current = ($a, $cpu_temp_to_fan_speed{$a});
+    foreach my $a (sort keys %temp_to_fan_speed) {
+        my @current = ($a, $temp_to_fan_speed{$a});
         if (@previous) {
             my $m = ($current[1] - $previous[1]) / ($current[0] - $previous[0]);
             my $b = $current[1] - ($m * $current[0]);
-            $cpu_temp_scale{$a} = [ $m, $b ];
+            $temp_scale{$a} = [ $m, $b ];
         }
         @previous = @current;
     }
@@ -135,28 +140,29 @@ sub CalculateScalars {
 
 # Update fan speeds based on current temperatures
 sub UpdateFanSpeed {
-    my ($cpu1_temp, $cpu2_temp) = GetCPUTemp();
+    my ($cpu1_temp, $ram_temp, $cpu2_temp) = GetTemps();
 
-    $g_current_cpu_temp[0] = $cpu1_temp;
-    $g_current_cpu_temp[1] = $cpu2_temp;
+    $g_current_temps[0] = $cpu1_temp;
+    $g_current_temps[1] = $ram_temp;
+    $g_current_temps[2] = $cpu2_temp;
 
     print "    CPU1: $cpu1_temp °C\n";
+    print "    RAM: $ram_temp °C\n";
     print "    CPU2: $cpu2_temp °C\n";
-    print "    Min temperature: " . min($cpu1_temp, $cpu2_temp) . " °C\n";
 
     # Calculate fan speeds for each bank
     my @desired_fan_speeds = (0, 0, 0);
-    my @temps = ($cpu1_temp, min($cpu1_temp, $cpu2_temp), $cpu2_temp);
+    my @temps = ($cpu1_temp, $ram_temp, $cpu2_temp);
 
     for my $bank (1..3) {
         my $temp = $temps[$bank - 1];
-        my $calculated_speed = 15; # Default minimum speed
+        my $calculated_speed = 10; # Default minimum speed for quiet operation
 
-        foreach my $a (reverse sort keys %cpu_temp_scale) {
+        foreach my $a (reverse sort keys %temp_scale) {
             if ($temp <= $a) {
-                my @formula = @{$cpu_temp_scale{$a}};
+                my @formula = @{$temp_scale{$a}};
                 $calculated_speed = ($formula[0] * $temp) + $formula[1];
-                $calculated_speed = 15 if $calculated_speed < 15; # Ensure minimum speed
+                $calculated_speed = 10 if $calculated_speed < 10; # Ensure minimum speed
                 $desired_fan_speeds[$bank - 1] = sprintf("%.0f", $calculated_speed);
                 last;
             }
@@ -175,13 +181,14 @@ sub UpdateFanSpeed {
     # Save temperatures
     open(my $fh, '>>', '/tmp/fan_speed_telegraf') or die "Cannot open file: $!";
     print $fh "temperature,host=$hostname cpu1_temp_c=$cpu1_temp\n";
+    print $fh "temperature,host=$hostname ram_temp_c=$ram_temp\n";
     print $fh "temperature,host=$hostname cpu2_temp_c=$cpu2_temp\n";
     close($fh);
 
     # Set fan speeds for each bank
     SetFanSpeed(1, $desired_fan_speeds[0], $cpu1_temp, 0);
-    SetFanSpeed(2, $desired_fan_speeds[1], min($cpu1_temp, $cpu2_temp), 0);
-    SetFanSpeed(3, $desired_fan_speeds[2], $cpu2_temp, 1);
+    SetFanSpeed(2, $desired_fan_speeds[1], $ram_temp, 1);
+    SetFanSpeed(3, $desired_fan_speeds[2], $cpu2_temp, 2);
 }
 
 # === Main loop ===
