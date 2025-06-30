@@ -86,6 +86,17 @@ sub GetTemps {
     my $current_cpu = '';
 
     my $sensors_output = `sensors`;
+    
+    # Агрессивный поиск температуры RAM - ищем любое числовое значение после temp1:
+    foreach my $line (split(/\n/, $sensors_output)) {
+        if ($line =~ /temp1:\D*(\+?\d+\.?\d*)/) {
+            $ram_temp = $1;
+            $ram_temp =~ s/\+//; # Удаляем плюс если есть
+            last;
+        }
+    }
+
+    # Обработка CPU температур (оригинальный код)
     foreach my $line (split(/\n/, $sensors_output)) {
         if ($line =~ /coretemp-isa-0000/) {
             $current_cpu = 'cpu1';
@@ -93,12 +104,9 @@ sub GetTemps {
         } elsif ($line =~ /coretemp-isa-0001/) {
             $current_cpu = 'cpu2';
             next;
-        } elsif ($line =~ /intel5500-pci-.*temp1:\s+\+(\d+\.\d)\s*C/) {
-            $ram_temp = $1;
-            next;
         }
-        # Match CPU temperature lines (e.g., "Core 0:       +38.0 C")
-        if ($line =~ /Core \d+:\s+\+(\d+\.\d)\s*C/) {
+        
+        if ($line =~ /Core \d+:\s+\+(\d+\.\d)\s*°?C/) {
             my $temp = $1;
             if ($current_cpu eq 'cpu1') {
                 push @$cpu1_temps, $temp;
@@ -108,17 +116,22 @@ sub GetTemps {
         }
     }
 
-    # Calculate average temperatures
+    # Рассчет средних значений
     my $cpu1_avg = @$cpu1_temps ? sprintf("%.1f", (sum(@$cpu1_temps) / @$cpu1_temps)) : 0;
     my $cpu2_avg = @$cpu2_temps ? sprintf("%.1f", (sum(@$cpu2_temps) / @$cpu2_temps)) : 0;
-    my $ram_avg = @$cpu2_temps ? sprintf("%.1f", (sum(@$cpu2_temps) / @$cpu2_temps)) : 0;
 
-    # Log warning if RAM temperature is not detected
-    if ($ram_avg == 0) {
-        print "WARNING: RAM temperature not detected, check sensor name in 'sensors' output\n";
+    # Если RAM температура не найдена, выводим отладочную информацию
+    if ($ram_temp == 0) {
+        my @potential_matches = grep { /temp1:/i } split(/\n/, $sensors_output);
+        if (@potential_matches) {
+            warn "RAM temperature detected but format may be different. Potential matches:\n";
+            warn join("\n", @potential_matches) . "\n";
+        } else {
+            warn "No RAM temperature sensors found in output\n";
+        }
     }
 
-    return ($cpu1_avg, $ram_avg, $cpu2_avg);
+    return ($cpu1_avg, $ram_temp, $cpu2_avg);
 }
 
 # Sum array elements
