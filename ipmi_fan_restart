@@ -1,0 +1,45 @@
+#!/bin/bash
+
+# Script to restart the ipmi_fancontrol-ng service with an updated script
+
+# Path to the updated script (adjust if different)
+SOURCE_SCRIPT="/root/ipmi_fancontrol-ng"
+TARGET_SCRIPT="/usr/bin/ipmi_fancontrol-ng"
+LOG_FILE="/var/log/ipmi_fancontrol.log"
+SERVICE_NAME="ipmi_fancontrol-ng"
+
+# Stop the service
+echo "Stopping $SERVICE_NAME service..."
+systemctl stop $SERVICE_NAME
+
+# Copy the updated script
+echo "Copying $SOURCE_SCRIPT to $TARGET_SCRIPT..."
+cp "$SOURCE_SCRIPT" "$TARGET_SCRIPT"
+
+# Set executable permissions
+echo "Setting executable permissions on $TARGET_SCRIPT..."
+chmod +x "$TARGET_SCRIPT"
+
+# Reload systemd
+echo "Reloading systemd daemon..."
+systemctl daemon-reload
+
+# Start the service
+echo "Starting $SERVICE_NAME service..."
+systemctl start $SERVICE_NAME
+
+# Check service status
+echo "Checking $SERVICE_NAME service status..."
+systemctl status $SERVICE_NAME
+
+# Display recent logs
+echo "Recent logs from $LOG_FILE:"
+tail -n 20 "$LOG_FILE"
+
+# Verify fan speeds
+echo "Checking fan speeds via IPMI..."
+ipmitool sdr | grep -i fan
+
+# Verify metrics
+echo "Checking metrics in /tmp/fan_speed_telegraf..."
+tail -n 10 /tmp/fan_speed_telegraf
