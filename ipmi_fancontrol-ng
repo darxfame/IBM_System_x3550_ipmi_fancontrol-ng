@@ -8,6 +8,7 @@ use List::Util qw[min max sum];
 # Fan Bank 1: based on average temperature of CPU1 (coretemp-isa-0000)
 # Fan Bank 2: based on minimum average temperature of CPU1 and CPU2
 # Fan Bank 3: based on average temperature of CPU2 (coretemp-isa-0001)
+# On startup, sets fans to 100% for $seconds_to_sleep seconds, then reverts to temperature-based control
 
 # === Configuration ===
 my $hostname = `hostname`;
@@ -15,7 +16,7 @@ chomp($hostname);
 
 my $number_of_fanbanks = 3;          # Total number of fan banks
 my $min_temp_change    = 1;          # Minimum temperature change to update fan speed
-my $seconds_to_sleep   = 5;          # Interval for checking temperatures (seconds)
+my $seconds_to_sleep   = 5;          # Interval for checking temperatures and initial max speed duration (seconds)
 
 my $ipmi_preamble = "ipmitool";      # Local IPMI command, no authentication needed
 
@@ -186,6 +187,15 @@ sub UpdateFanSpeed {
 # === Main loop ===
 print "Starting fan control script for IBM x3550 M3...\n";
 SetManualFanMode();
+
+# Set all fans to 100% for $seconds_to_sleep seconds at startup
+print "Setting all fans to 100% for $seconds_to_sleep seconds...\n";
+for my $bank (1..$number_of_fanbanks) {
+    Internal_DoSetFanSpeed($bank, 100);
+}
+sleep $seconds_to_sleep;
+print "Reverting to temperature-based fan control...\n";
+
 CalculateScalars();
 
 while (1) {
