@@ -4,8 +4,7 @@ use warnings;
 use List::Util qw[min max sum];
 
 # === Fan control script for IBM x3550 M3 ===
-# FINAL CORRECTED VERSION
-# Last fix: Fixed syntax error in GetTemps() and improved formatting
+# FINAL CORRECTED VERSION WITH TELEGRAF METRICS
 
 # === Configuration ===
 my $hostname = `hostname`;
@@ -109,7 +108,7 @@ sub GetTemps {
         }
     }
 
-    # Calculate averages (fixed syntax error here)
+    # Calculate averages
     my $cpu1_avg = @$cpu1_temps ? sprintf("%.1f", sum(@$cpu1_temps)/@$cpu1_temps) : 40;
     my $cpu2_avg = @$cpu2_temps ? sprintf("%.1f", sum(@$cpu2_temps)/@$cpu2_temps) : 40;
 
@@ -158,11 +157,14 @@ sub UpdateFanSpeed {
                   $bank, $g_current_fan_duty_cycle[$bank-1], $desired_fan_speeds[$bank-1]));
     }
 
-    # Save metrics
-    open(my $fh, '>>', '/tmp/fan_metrics');
-    print $fh "fans,host=$hostname,bank=1 speed=$desired_fan_speeds[0]\n";
-    print $fh "fans,host=$hostname,bank=2 speed=$desired_fan_speeds[1]\n";
-    print $fh "fans,host=$hostname,bank=3 speed=$desired_fan_speeds[2]\n";
+    # Save metrics for Telegraf (added back)
+    open(my $fh, '>>', '/tmp/fan_speed_telegraf') or die "Cannot open telegraf file: $!";
+    print $fh "fans,host=$hostname,bank=1 speed_percent=$desired_fan_speeds[0]\n";
+    print $fh "fans,host=$hostname,bank=2 speed_percent=$desired_fan_speeds[1]\n";
+    print $fh "fans,host=$hostname,bank=3 speed_percent=$desired_fan_speeds[2]\n";
+    print $fh "temperature,host=$hostname cpu1_temp_c=$cpu1_temp\n";
+    print $fh "temperature,host=$hostname ram_temp_c=$ram_temp\n";
+    print $fh "temperature,host=$hostname cpu2_temp_c=$cpu2_temp\n";
     close($fh);
 
     SetFanSpeed(1, $desired_fan_speeds[0], $cpu1_temp, 0);
