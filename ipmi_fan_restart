@@ -1,14 +1,15 @@
 #!/bin/bash
 
-# Script to restart the ipmi_fancontrol-ng service with an updated script
+# Script to restart the ipmi_fancontrol-ng service and telegraf (if present) with an updated script
 
 # Path to the updated script (adjust if different)
 SOURCE_SCRIPT="/root/ipmi_fancontrol-ng"
 TARGET_SCRIPT="/usr/bin/ipmi_fancontrol-ng"
 LOG_FILE="/var/log/ipmi_fancontrol.log"
 SERVICE_NAME="ipmi_fancontrol-ng"
+TELEGRAF_SERVICE="telegraf"
 
-# Stop the service
+# Stop the ipmi_fancontrol-ng service
 echo "Stopping $SERVICE_NAME service..."
 systemctl stop $SERVICE_NAME
 
@@ -24,11 +25,21 @@ chmod +x "$TARGET_SCRIPT"
 echo "Reloading systemd daemon..."
 systemctl daemon-reload
 
-# Start the service
+# Start the ipmi_fancontrol-ng service
 echo "Starting $SERVICE_NAME service..."
 systemctl start $SERVICE_NAME
 
-# Check service status
+# Check if telegraf service exists and restart it
+if systemctl list-units --full -all | grep -q "$TELEGRAF_SERVICE"; then
+    echo "Telegraf service found, restarting $TELEGRAF_SERVICE..."
+    systemctl restart $TELEGRAF_SERVICE
+    echo "Checking $TELEGRAF_SERVICE status..."
+    systemctl status $TELEGRAF_SERVICE
+else
+    echo "Telegraf service not found, skipping restart."
+fi
+
+# Check ipmi_fancontrol-ng service status
 echo "Checking $SERVICE_NAME service status..."
 systemctl status $SERVICE_NAME
 
