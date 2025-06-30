@@ -111,7 +111,7 @@ sub GetTemps {
     # Calculate average temperatures
     my $cpu1_avg = @$cpu1_temps ? sprintf("%.1f", (sum(@$cpu1_temps) / @$cpu1_temps)) : 0;
     my $cpu2_avg = @$cpu2_temps ? sprintf("%.1f", (sum(@$cpu2_temps) / @$cpu2_temps)) : 0;
-    my $ram_avg = $ram_temp || 0;
+    my $ram_avg = @$cpu2_temps ? sprintf("%.1f", (sum(@$cpu2_temps) / @$cpu2_temps)) : 0;
 
     # Log warning if RAM temperature is not detected
     if ($ram_avg == 0) {
@@ -179,16 +179,12 @@ sub UpdateFanSpeed {
         # Save metrics for Telegraf/InfluxDB
         open(my $fh, '>>', '/tmp/fan_speed_telegraf') or die "Cannot open file: $!";
         print $fh "fans,host=$hostname,bank=$bank speed_percent=$desired_fan_speeds[$bank-1]\n";
-        print $fh "fans,host=$hostname,bank=$bank speed_raw=0x" . sprintf("%x", $desired_fan_speeds[$bank-1]) . "\n";
+  	print $fh "temperature,host=$hostname cpu1_temp_c=$cpu1_temp\n";
+ 	print $fh "temperature,host=$hostname ram_temp_c=$ram_temp\n";
+  	print $fh "temperature,host=$hostname cpu2_temp_c=$cpu2_temp\n";
+
         close($fh);
     }
-
-    # Save temperatures
-    open(my $fh, '>>', '/tmp/fan_speed_telegraf') or die "Cannot open file: $!";
-    print $fh "temperature,host=$hostname cpu1_temp_c=$cpu1_temp\n";
-    print $fh "temperature,host=$hostname ram_temp_c=$ram_temp\n";
-    print $fh "temperature,host=$hostname cpu2_temp_c=$cpu2_temp\n";
-    close($fh);
 
     # Set fan speeds for each bank
     SetFanSpeed(1, $desired_fan_speeds[0], $cpu1_temp, 0);
