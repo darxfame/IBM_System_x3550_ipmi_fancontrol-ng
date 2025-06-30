@@ -6,7 +6,7 @@ use List::Util qw[min max sum];
 # === Fan control script for IBM x3550 M3 ===
 # Controls fans via IPMI based on CPU and RAM temperatures
 # Fan Bank 1: based on average temperature of CPU1 (coretemp-isa-0000)
-# Fan Bank 2: based on RAM temperature (intel5500-pci-00a3)
+# Fan Bank 2: based on RAM temperature (intel5500-pci-.*temp1)
 # Fan Bank 3: based on average temperature of CPU2 (coretemp-isa-0001)
 # On startup, sets fans to 100% for $seconds_to_sleep seconds, then reverts to temperature-based control
 # Optimized for minimal noise with low fan speeds for safe temperatures
@@ -93,7 +93,7 @@ sub GetTemps {
         } elsif ($line =~ /coretemp-isa-0001/) {
             $current_cpu = 'cpu2';
             next;
-        } elsif ($line =~ /intel5500-pci-00a3.*temp1:\s+\+(\d+\.\d)\s*C/) {
+        } elsif ($line =~ /intel5500-pci-.*temp1:\s+\+(\d+\.\d)\s*C/) {
             $ram_temp = $1;
             next;
         }
@@ -112,6 +112,11 @@ sub GetTemps {
     my $cpu1_avg = @$cpu1_temps ? sprintf("%.1f", (sum(@$cpu1_temps) / @$cpu1_temps)) : 0;
     my $cpu2_avg = @$cpu2_temps ? sprintf("%.1f", (sum(@$cpu2_temps) / @$cpu2_temps)) : 0;
     my $ram_avg = $ram_temp || 0;
+
+    # Log warning if RAM temperature is not detected
+    if ($ram_avg == 0) {
+        print "WARNING: RAM temperature not detected, check sensor name in 'sensors' output\n";
+    }
 
     return ($cpu1_avg, $ram_avg, $cpu2_avg);
 }
