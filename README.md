@@ -5,7 +5,7 @@
   I'm NOT a developer and i know nothing about perl and the unix system.
   What i did was figuring out how to modify the script according to the raw ipmi commands i've found on reddit posts and learning the tiny bit of perl i needed to know.
 
-  The porting involved changing the raw commands, removing the get GetFanRPM as it was useless in my scenario and IBM lists their fans as 1A 1B 2A 2B.
+  The porting involved changing the raw commands, removing the get GetFanRPM as it was useless in my scenario and IBM lists their fans as 1A 1B 2A 2B 3A 3B 4A 4B 5A 5B 6A 6B.
 
   Also the imm2 mantains a partial control over the fans actual speed, for example:
     - setting the fans at 30% result in an actual fan speed of roughly 24%
